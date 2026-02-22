@@ -1,0 +1,27 @@
+name: AI News Daily Push
+
+on:
+  schedule:
+    - cron: "0 23 * * *" # 每天北京时间 07:00 触发
+  workflow_dispatch: # 允许手动触发测试
+
+jobs:
+  push-news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install feedparser requests openai
+
+      - name: Run AI News Bot
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python src/main.py
