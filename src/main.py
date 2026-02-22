@@ -1,45 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-AI News Bot - 每日AI资讯聚合推送到飞书群
-Daily AI news aggregation and push to Feishu group.
-
-Features:
-- 英文渠道:中文渠道 = 6:4
-- 英文内容中英文对照 (使用智谱 AI 翻译)
-- 优先级：社媒 > 聚合社区 > 官方博客 > 学术前沿
-- 热点资讯控制在10条以内
-"""
-
 import os
 import json
 import re
-import hashlib
 import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
 from openai import OpenAI
 
-# ============================================================
-# 配置区 Configuration
-# ============================================================
-
+# 配置
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-
-# 北京时区
 CST = timezone(timedelta(hours=8))
+SOURCE_PRIORITY = {"social": 4, "community": 3, "official": 2, "academic": 1}
 
-# 渠道优先级权重（越高越优先）
-SOURCE_PRIORITY = {
-    "social": 4,
-    "community": 3,
-    "official": 2,
-    "academic": 1,
-}
-
-# RSS 数据源配置
 RSS_SOURCES = {
     "en": [
         {"name": "Reddit r/MachineLearning", "url": "https://www.reddit.com/r/MachineLearning/.rss", "priority": "social"},
@@ -60,15 +35,13 @@ RSS_SOURCES = {
     ],
 }
 
-AI_KEYWORDS = ["AI", "intelligence", "learning", "LLM", "GPT", "ChatGPT", "Claude", "Gemini", "人工智能", "大模型"]
-
-# ============================================================
-# 数据处理模块
-# ============================================================
-
-def fetch_rss(source: dict ) -> list:
+def fetch_rss(source):
+    print(f"  - 正在抓取: {source['name']}...")
     try:
-        feed = feedparser.parse(source["url"])
+        # 设置 User-Agent 避免被屏蔽
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        resp = requests.get(source["url"], headers=headers, timeout=15)
+        feed = feedparser.parse(resp.content)
         entries = []
         for entry in feed.entries[:15]:
             title = entry.get("title", "").strip()
@@ -76,25 +49,33 @@ def fetch_rss(source: dict ) -> list:
             summary = re.sub(r"<[^>]+>", "", entry.get("summary", entry.get("description", "")))[:300]
             if title and link:
                 entries.append({
-                    "title": title, "link": link, "summary": summary, "source": source["name"],
-                    "priority": SOURCE_PRIORITY.get(source["priority"], 1), "priority_label": source["priority"]
+                    "title": title, 
+                    "link": link, 
+                    "summary": summary, 
+                    "source": source["name"], 
+                    "priority": SOURCE_PRIORITY.get(source["priority"], 1), 
+                    "priority_label": source["priority"]
                 })
+        print(f"    成功抓取到 {len(entries)} 条内容")
         return entries
-    except: return []
+    except Exception as e:
+        print(f"    抓取失败: {e}")
+        return []
 
-def translate_to_chinese(text: str, client: OpenAI) -> str:
+def translate_to_chinese(text, client):
     if not text or not client: return ""
     try:
         response = client.chat.completions.create(
             model="glm-4-flash",
-            messages=[{"role": "system", "content": "你是一个专业的AI领域翻译，请将以下英文内容翻译为简洁的中文。只输出翻译结果。"},
-                      {"role": "user", "content": text}],
-            max_tokens=200, temperature=0.3
+            messages=[{"role": "system", "content": "你是一个专业的AI领域翻译，请将以下英文内容翻译为简洁的中文。只输出翻译结果。"}, {"role": "user", "content": text}],
+            max_tokens=300, temperature=0.3
         )
         return response.choices[0].message.content.strip()
-    except: return ""
+    except Exception as e:
+        print(f"    翻译出错: {e}")
+        return ""
 
-def build_feishu_card(news_items: list) -> dict:
+def build_feishu_card(news_items):
     now_cst = datetime.now(tz=CST)
     elements = [{"tag": "hr"}]
     for i, item in enumerate(news_items, 1):
@@ -107,37 +88,56 @@ def build_feishu_card(news_items: list) -> dict:
         content += f"[🔗 阅读原文]({item['link']})"
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
         elements.append({"tag": "hr"})
-    
     elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"⏰ 更新时间：{now_cst.strftime('%H:%M')} CST | 🤖 AI News Bot"}})
     return {
-        "header": {"template": "blue", "title": {"tag": "plain_text", "content": f"🤖 AI 日报 · {now_cst.strftime('%m月%d日')}"}},
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": f"🤖 AI 日报 · {now_cst.strftime('%m月%d日')}"}}, 
         "elements": elements
     }
 
 def main():
-    client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://open.bigmodel.cn/api/paas/v4/" ) if OPENAI_API_KEY else None
+    print("=== AI News Bot 启动 ===")
+    client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://open.bigmodel.cn/api/paas/v4/") if OPENAI_API_KEY else None
+    if client: print("[OK] 智谱 AI 已就绪")
+    
     en_news, zh_news = [], []
-    for lang, sources in RSS_SOURCES.items():
-        for s in sources:
-            res = fetch_rss(s)
-            for r in res: r["lang"] = lang
-            if lang == "en": en_news.extend(res)
-            else: zh_news.extend(res)
+    print("\n[1/4] 抓取英文源...")
+    for s in RSS_SOURCES["en"]:
+        res = fetch_rss(s)
+        for r in res: r["lang"] = "en"
+        en_news.extend(res)
+    
+    print("\n[2/4] 抓取中文源...")
+    for s in RSS_SOURCES["zh"]:
+        res = fetch_rss(s)
+        for r in res: r["lang"] = "zh"
+        zh_news.extend(res)
+    
+    print(f"\n抓取汇总: 英文 {len(en_news)} 条, 中文 {len(zh_news)} 条")
     
     selected_en = sorted(en_news, key=lambda x: x['priority'], reverse=True)[:6]
     selected_zh = sorted(zh_news, key=lambda x: x['priority'], reverse=True)[:4]
     
+    print(f"已筛选热点: 英文 {len(selected_en)} 条, 中文 {len(selected_zh)} 条")
+    
     processed = []
+    print("\n[3/4] 翻译处理中...")
     for item in selected_en:
-        item.update({"title_zh": translate_to_chinese(item["title"], client), 
-                     "summary_zh": translate_to_chinese(item["summary"], client), "is_bilingual": True})
+        item.update({
+            "title_zh": translate_to_chinese(item["title"], client), 
+            "summary_zh": translate_to_chinese(item["summary"], client), 
+            "is_bilingual": True
+        })
         processed.append(item)
     for item in selected_zh:
         item["is_bilingual"] = False
         processed.append(item)
-        
+    
+    print("\n[4/4] 推送至飞书...")
     card = build_feishu_card(processed)
-    requests.post(FEISHU_WEBHOOK_URL, json={"msg_type": "interactive", "card": json.dumps(card)})
+    resp = requests.post(FEISHU_WEBHOOK_URL, json={"msg_type": "interactive", "card": json.dumps(card)})
+    print(f"推送结果: {resp.json()}")
+    print("=== AI News Bot 完成 ===")
 
 if __name__ == "__main__":
     main()
